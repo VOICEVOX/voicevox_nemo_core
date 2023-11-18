@@ -37,7 +37,7 @@ const DEFAULT_OUTPUT: &str = if cfg!(windows) {
 };
 
 const ORGANIZATION_NAME: &str = "VOICEVOX";
-const CORE_REPO_NAME: &str = "voicevox_core";
+const CORE_REPO_NAME: &str = "voicevox_nemo_core";
 const ADDITIONAL_LIBRARIES_REPO_NAME: &str = "voicevox_additional_libraries";
 
 static OPEN_JTALK_DIC_URL: Lazy<Url> = Lazy::new(|| {
@@ -144,7 +144,8 @@ async fn main() -> anyhow::Result<()> {
             (Os::Linux, Device::Cuda) => "gpu",
             (_, device) => device.into(),
         };
-        format!("{CORE_REPO_NAME}-{os}-{cpu_arch}-{device}-{tag}.zip")
+        // NemoのCoreはvoicevox_nemo_coreではなくvoicevox_coreから始まる
+        format!("voicevox_core-{os}-{cpu_arch}-{device}-{tag}.zip")
     })
     .await?;
 
