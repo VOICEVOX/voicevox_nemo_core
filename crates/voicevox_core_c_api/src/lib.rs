@@ -2,19 +2,21 @@
 mod compatible_engine;
 mod helpers;
 use self::helpers::*;
+use chrono::SecondsFormat;
 use is_terminal::IsTerminal;
-use libc::c_void;
 use once_cell::sync::Lazy;
 use std::env;
 use std::ffi::{CStr, CString};
+use std::fmt;
 use std::io::{self, Write};
 use std::os::raw::c_char;
 use std::ptr::null;
 use std::sync::{Mutex, MutexGuard};
+use tracing_subscriber::fmt::format::Writer;
 use tracing_subscriber::EnvFilter;
-use voicevox_core::AudioQueryModel;
 use voicevox_core::Result;
 use voicevox_core::VoicevoxCore;
+use voicevox_core::{AccentPhraseModel, AudioQueryModel};
 
 #[cfg(test)]
 use rstest::*;
@@ -32,9 +34,16 @@ static INTERNAL: Lazy<Mutex<Internal>> = Lazy::new(|| {
             } else {
                 "error,voicevox_core=info,voicevox_core_c_api=info,onnxruntime=info".into()
             })
+            .with_timer(local_time as fn(&mut Writer<'_>) -> _)
             .with_ansi(out().is_terminal() && env_allows_ansi())
             .with_writer(out)
             .try_init()
+    }
+
+    fn local_time(wtr: &mut Writer<'_>) -> fmt::Result {
+        // ローカル時刻で表示はするが、そのフォーマットはtracing-subscriber本来のものに近いようにする。
+        // https://github.com/tokio-rs/tracing/blob/tracing-subscriber-0.3.16/tracing-subscriber/src/fmt/time/datetime.rs#L235-L241
+        wtr.write_str(&chrono::Local::now().to_rfc3339_opts(SecondsFormat::Micros, false))
     }
 
     fn out() -> impl IsTerminal + Write {
@@ -56,6 +65,9 @@ static INTERNAL: Lazy<Mutex<Internal>> = Lazy::new(|| {
 pub(crate) fn lock_internal() -> MutexGuard<'static, Internal> {
     INTERNAL.lock().unwrap()
 }
+
+// C_APIに渡すために，VecやCStringのサイズを記憶しながら生ポインタを得るためのマネージャ
+static BUFFER_MANAGER: Mutex<BufferManager> = Mutex::new(BufferManager::new());
 
 /*
  * Cの関数として公開するための型や関数を定義するこれらの実装はvoicevox_core/publish.rsに定義してある対応する関数にある
@@ -189,11 +201,11 @@ pub unsafe extern "C" fn voicevox_predict_duration(
             std::slice::from_raw_parts_mut(phoneme_vector, length),
             speaker_id,
         )?;
-        write_predict_duration_to_ptr(
-            output_predict_duration_data,
-            output_predict_duration_data_length,
-            &output_vec,
-        );
+        let (ptr, size) = BUFFER_MANAGER.lock().unwrap().vec_into_raw(output_vec);
+
+        output_predict_duration_data_length.write(size);
+        output_predict_duration_data.write(ptr);
+
         Ok(())
     })())
 }
@@ -202,10 +214,13 @@ pub unsafe extern "C" fn voicevox_predict_duration(
 /// @param[in] predict_duration_data 確保されたメモリ領域
 ///
 /// # Safety
-/// @param predict_duration_data 実行後に割り当てられたメモリ領域が解放される
+/// @param predict_duration_data voicevox_predict_durationで確保されたポインタであり、かつ呼び出し側でバッファの変更が行われていないこと
 #[no_mangle]
 pub unsafe extern "C" fn voicevox_predict_duration_data_free(predict_duration_data: *mut f32) {
-    libc::free(predict_duration_data as *mut c_void);
+    BUFFER_MANAGER
+        .lock()
+        .unwrap()
+        .dealloc_slice(predict_duration_data as *const f32);
 }
 
 /// モーラごとのF0を推論する
@@ -254,11 +269,10 @@ pub unsafe extern "C" fn voicevox_predict_intonation(
             std::slice::from_raw_parts(end_accent_phrase_vector, length),
             speaker_id,
         )?;
-        write_predict_intonation_to_ptr(
-            output_predict_intonation_data,
-            output_predict_intonation_data_length,
-            &output_vec,
-        );
+        let (ptr, len) = BUFFER_MANAGER.lock().unwrap().vec_into_raw(output_vec);
+        output_predict_intonation_data.write(ptr);
+        output_predict_intonation_data_length.write(len);
+
         Ok(())
     })())
 }
@@ -268,9 +282,13 @@ pub unsafe extern "C" fn voicevox_predict_intonation(
 ///
 /// # Safety
 /// @param predict_intonation_data 実行後に割り当てられたメモリ領域が解放される
+/// @param predict_duration_data voicevox_predict_intonationで確保された，ポインタでありかつ，呼び出し側でバッファの変更を行われていないこと.
 #[no_mangle]
 pub unsafe extern "C" fn voicevox_predict_intonation_data_free(predict_intonation_data: *mut f32) {
-    libc::free(predict_intonation_data as *mut c_void);
+    BUFFER_MANAGER
+        .lock()
+        .unwrap()
+        .dealloc_slice(predict_intonation_data as *const f32);
 }
 
 /// decodeを実行する
@@ -306,7 +324,9 @@ pub unsafe extern "C" fn voicevox_decode(
             std::slice::from_raw_parts(phoneme_vector, phoneme_size * length),
             speaker_id,
         )?;
-        write_decode_to_ptr(output_decode_data, output_decode_data_length, &output_vec);
+        let (ptr, len) = BUFFER_MANAGER.lock().unwrap().vec_into_raw(output_vec);
+        output_decode_data.write(ptr);
+        output_decode_data_length.write(len);
         Ok(())
     })())
 }
@@ -315,10 +335,10 @@ pub unsafe extern "C" fn voicevox_decode(
 /// @param[in] decode_data 確保されたメモリ領域
 ///
 /// # Safety
-/// @param decode_data 実行後に割り当てられたメモリ領域が解放される
+/// @param decode_data voicevox_decodeで確保されたポインタであり、かつ呼び出し側でバッファの変更を行われていないこと
 #[no_mangle]
 pub unsafe extern "C" fn voicevox_decode_data_free(decode_data: *mut f32) {
-    libc::free(decode_data as *mut c_void);
+    BUFFER_MANAGER.lock().unwrap().dealloc_slice(decode_data);
 }
 
 /// Audio query のオプション
@@ -336,7 +356,7 @@ pub extern "C" fn voicevox_make_default_audio_query_options() -> VoicevoxAudioQu
 }
 
 /// AudioQuery を実行する
-/// @param [in] text テキスト
+/// @param [in] text テキスト。文字コードはUTF-8
 /// @param [in] speaker_id 話者ID
 /// @param [in] options AudioQueryのオプション
 /// @param [out] output_audio_query_json AudioQuery を json でフォーマットしたもの
@@ -354,8 +374,140 @@ pub unsafe extern "C" fn voicevox_audio_query(
 ) -> VoicevoxResultCode {
     into_result_code_with_error((|| {
         let text = CStr::from_ptr(text);
-        let audio_query = &create_audio_query(text, speaker_id, Internal::audio_query, options)?;
-        write_json_to_ptr(output_audio_query_json, audio_query);
+        let audio_query = create_audio_query(text, speaker_id, Internal::audio_query, options)?;
+
+        output_audio_query_json.write(audio_query.into_raw());
+        Ok(())
+    })())
+}
+
+/// `accent_phrases` のオプション
+#[repr(C)]
+pub struct VoicevoxAccentPhrasesOptions {
+    /// aquestalk形式のkanaとしてテキストを解釈する
+    kana: bool,
+}
+
+/// デフォルトの `accent_phrases` のオプションを生成する
+/// @return デフォルト値が設定された `accent_phrases` のオプション
+#[no_mangle]
+pub extern "C" fn voicevox_make_default_accent_phrases_options() -> VoicevoxAccentPhrasesOptions {
+    voicevox_core::AccentPhrasesOptions::default().into()
+}
+
+/// `accent_phrases` を実行する
+/// @param [in] text テキスト。文字コードはUTF-8
+/// @param [in] speaker_id 話者ID
+/// @param [in] options `accent_phrases`のオプション
+/// @param [out] output_accent_phrases_json アクセント句の情報の配列を json でフォーマットしたもの
+/// @return 結果コード #VoicevoxResultCode
+///
+/// # Safety
+/// @param text null終端文字列であること
+/// @param output_accent_phrases_json 自動でheapメモリが割り当てられるので ::voicevox_accent_phrases_json_free で解放する必要がある
+#[no_mangle]
+pub unsafe extern "C" fn voicevox_accent_phrases(
+    text: *const c_char,
+    speaker_id: u32,
+    options: VoicevoxAccentPhrasesOptions,
+    output_accent_phrases_json: *mut *mut c_char,
+) -> VoicevoxResultCode {
+    into_result_code_with_error((|| {
+        let text = CStr::from_ptr(text);
+        let accent_phrases =
+            create_accent_phrases(text, speaker_id, Internal::accent_phrases, options)?;
+
+        output_accent_phrases_json.write(accent_phrases.into_raw());
+        Ok(())
+    })())
+}
+///
+/// アクセント句の音素長を変更する
+/// @param [in] accent_phrases_json アクセント句の配列を json でフォーマットしたもの
+/// @param [in] speaker_id 話者ID
+/// @param [out] output_accent_phrases_json 音素長が変更されたアクセント句の情報の配列を json でフォーマットしたもの
+/// @return 結果コード #VoicevoxResultCode
+///
+/// # Safety
+/// @param accent_phrases_json null終端文字列であること
+/// @param output_accent_phrases_json 自動でheapメモリが割り当てられるので ::voicevox_accent_phrases_json_free で解放する必要がある
+#[no_mangle]
+pub unsafe extern "C" fn voicevox_mora_length(
+    accent_phrases_json: *const c_char,
+    speaker_id: u32,
+    output_accent_phrases_json: *mut *mut c_char,
+) -> VoicevoxResultCode {
+    into_result_code_with_error((|| {
+        let accent_phrases_json = CStr::from_ptr(accent_phrases_json)
+            .to_str()
+            .map_err(|_| CApiError::InvalidUtf8Input)?;
+        let accent_phrases: Vec<AccentPhraseModel> =
+            serde_json::from_str(accent_phrases_json).map_err(CApiError::InvalidAccentPhrase)?;
+
+        let accent_phrases_with_mora_length =
+            modify_accent_phrases(&accent_phrases, speaker_id, Internal::mora_length)?;
+
+        output_accent_phrases_json.write(accent_phrases_with_mora_length.into_raw());
+        Ok(())
+    })())
+}
+
+/// アクセント句の音高を変更する
+/// @param [in] accent_phrases_json アクセント句の配列を json でフォーマットしたもの
+/// @param [in] speaker_id 話者ID
+/// @param [out] output_accent_phrases_json 音高が変更されたアクセント句の情報の配列を json でフォーマットしたもの
+/// @return 結果コード #VoicevoxResultCode
+///
+/// # Safety
+/// @param accent_phrases_json null終端文字列であること
+/// @param output_accent_phrases_json 自動でheapメモリが割り当てられるので ::voicevox_accent_phrases_json_free で解放する必要がある
+#[no_mangle]
+pub unsafe extern "C" fn voicevox_mora_pitch(
+    accent_phrases_json: *const c_char,
+    speaker_id: u32,
+    output_accent_phrases_json: *mut *mut c_char,
+) -> VoicevoxResultCode {
+    into_result_code_with_error((|| {
+        let accent_phrases_json = CStr::from_ptr(accent_phrases_json)
+            .to_str()
+            .map_err(|_| CApiError::InvalidUtf8Input)?;
+        let accent_phrases: Vec<AccentPhraseModel> =
+            serde_json::from_str(accent_phrases_json).map_err(CApiError::InvalidAccentPhrase)?;
+
+        let accent_phrases_with_mora_pitch =
+            modify_accent_phrases(&accent_phrases, speaker_id, Internal::mora_pitch)?;
+
+        output_accent_phrases_json.write(accent_phrases_with_mora_pitch.into_raw());
+        Ok(())
+    })())
+}
+
+/// アクセント句の音高・音素長を変更する
+/// @param [in] accent_phrases_json アクセント句の配列を json でフォーマットしたもの
+/// @param [in] speaker_id 話者ID
+/// @param [out] output_accent_phrases_json 音高・音素長が変更されたアクセント句の情報の配列を json でフォーマットしたもの
+/// @return 結果コード #VoicevoxResultCode
+///
+/// # Safety
+/// @param accent_phrases_json null終端文字列であること
+/// @param output_accent_phrases_json 自動でheapメモリが割り当てられるので ::voicevox_accent_phrases_json_free で解放する必要がある
+#[no_mangle]
+pub unsafe extern "C" fn voicevox_mora_data(
+    accent_phrases_json: *const c_char,
+    speaker_id: u32,
+    output_accent_phrases_json: *mut *mut c_char,
+) -> VoicevoxResultCode {
+    into_result_code_with_error((|| {
+        let accent_phrases_json = CStr::from_ptr(accent_phrases_json)
+            .to_str()
+            .map_err(|_| CApiError::InvalidUtf8Input)?;
+        let accent_phrases: Vec<AccentPhraseModel> =
+            serde_json::from_str(accent_phrases_json).map_err(CApiError::InvalidAccentPhrase)?;
+
+        let accent_phrases_with_mora_data =
+            modify_accent_phrases(&accent_phrases, speaker_id, Internal::mora_data)?;
+
+        output_accent_phrases_json.write(accent_phrases_with_mora_data.into_raw());
         Ok(())
     })())
 }
@@ -399,8 +551,12 @@ pub unsafe extern "C" fn voicevox_synthesis(
             .map_err(|_| CApiError::InvalidUtf8Input)?;
         let audio_query =
             &serde_json::from_str(audio_query_json).map_err(CApiError::InvalidAudioQuery)?;
-        let wav = &lock_internal().synthesis(audio_query, speaker_id, options.into())?;
-        write_wav_to_ptr(output_wav, output_wav_length, wav);
+        let wav = lock_internal().synthesis(audio_query, speaker_id, options.into())?;
+
+        let (ptr, len) = BUFFER_MANAGER.lock().unwrap().vec_into_raw(wav);
+        output_wav.write(ptr);
+        output_wav_length.write(len);
+
         Ok(())
     })())
 }
@@ -422,7 +578,7 @@ pub extern "C" fn voicevox_make_default_tts_options() -> VoicevoxTtsOptions {
 }
 
 /// テキスト音声合成を実行する
-/// @param [in] text テキスト
+/// @param [in] text テキスト。文字コードはUTF-8
 /// @param [in] speaker_id 話者ID
 /// @param [in] options テキスト音声合成オプション
 /// @param [out] output_wav_length 出力する wav データのサイズ
@@ -443,7 +599,9 @@ pub unsafe extern "C" fn voicevox_tts(
     into_result_code_with_error((|| {
         let text = ensure_utf8(CStr::from_ptr(text))?;
         let output = lock_internal().tts(text, speaker_id, options.into())?;
-        write_wav_to_ptr(output_wav, output_wav_length, output.as_slice());
+        let (ptr, size) = BUFFER_MANAGER.lock().unwrap().vec_into_raw(output);
+        output_wav.write(ptr);
+        output_wav_length.write(size);
         Ok(())
     })())
 }
@@ -452,20 +610,30 @@ pub unsafe extern "C" fn voicevox_tts(
 /// @param [in] audio_query_json 解放する json フォーマットされた AudioQuery データ
 ///
 /// # Safety
-/// @param wav 確保したメモリ領域が破棄される
+/// @param voicevox_audio_query で確保されたポインタであり、かつ呼び出し側でバッファの変更を行われていないこと
 #[no_mangle]
 pub unsafe extern "C" fn voicevox_audio_query_json_free(audio_query_json: *mut c_char) {
-    libc::free(audio_query_json as *mut c_void);
+    drop(CString::from_raw(audio_query_json));
+}
+
+/// jsonフォーマットされた AccnetPhrase データのメモリを解放する
+/// @param [in] accented_phrase_json 解放する json フォーマットされた AccnetPhrase データ
+///
+/// # Safety
+/// @param voicevox_accent_phrases で確保されたポインタであり、かつ呼び出し側でバッファの変更を行われていないこと
+#[no_mangle]
+pub unsafe extern "C" fn voicevox_accent_phrases_json_free(accented_phrase_json: *mut c_char) {
+    drop(CString::from_raw(accented_phrase_json));
 }
 
 /// wav データのメモリを解放する
 /// @param [in] wav 解放する wav データ
 ///
 /// # Safety
-/// @param wav 確保したメモリ領域が破棄される
+/// @param wav voicevox_tts,voicevox_synthesis で確保されたポインタであり、かつ呼び出し側でバッファの変更を行われていないこと
 #[no_mangle]
 pub unsafe extern "C" fn voicevox_wav_free(wav: *mut u8) {
-    libc::free(wav as *mut c_void);
+    BUFFER_MANAGER.lock().unwrap().dealloc_slice(wav);
 }
 
 /// エラー結果をメッセージに変換する
