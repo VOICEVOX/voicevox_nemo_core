@@ -31,16 +31,28 @@ pub(crate) static MODEL_FILE_SET: Lazy<ModelFileSet> = Lazy::new(|| {
 });
 
 pub struct Status {
-    models: StatusModels,
+    talk_models: StatusTalkModels,
+    sing_teacher_models: StatusSingTeacherModels,
+    sf_decode_models: StatusSfModels,
     light_session_options: SessionOptions, // 軽いモデルはこちらを使う
     heavy_session_options: SessionOptions, // 重いモデルはこちらを使う
     supported_styles: BTreeSet<u32>,
 }
 
-struct StatusModels {
+struct StatusTalkModels {
     predict_duration: BTreeMap<usize, Session<'static>>,
     predict_intonation: BTreeMap<usize, Session<'static>>,
     decode: BTreeMap<usize, Session<'static>>,
+}
+
+struct StatusSingTeacherModels {
+    predict_sing_consonant_length: BTreeMap<usize, Session<'static>>,
+    predict_sing_f0: BTreeMap<usize, Session<'static>>,
+    predict_sing_volume: BTreeMap<usize, Session<'static>>,
+}
+
+struct StatusSfModels {
+    sf_decode: BTreeMap<usize, Session<'static>>,
 }
 
 #[derive(new, Getters)]
@@ -50,9 +62,13 @@ struct SessionOptions {
 }
 
 pub(crate) struct ModelFileSet {
-    pub(crate) speaker_id_map: BTreeMap<u32, (usize, u32)>,
+    pub(crate) talk_speaker_id_map: BTreeMap<u32, (usize, u32)>,
+    pub(crate) sing_teacher_speaker_id_map: BTreeMap<u32, (usize, u32)>,
+    pub(crate) sf_decode_speaker_id_map: BTreeMap<u32, (usize, u32)>,
     pub(crate) metas_str: String,
-    models: Vec<Model>,
+    talk_models: Vec<TalkModel>,
+    sing_teacher_models: Vec<SingTeacherModel>,
+    sf_decode_models: Vec<SfDecodeModel>,
 }
 
 impl ModelFileSet {
@@ -76,18 +92,18 @@ impl ModelFileSet {
 
         let metas_str = fs_err::read_to_string(path("metas.json"))?;
 
-        let models = model_file::MODEL_FILE_NAMES
+        let talk_models = model_file::TALK_MODEL_FILE_NAMES
             .iter()
             .map(
-                |&ModelFileNames {
+                |&TalkModelFileNames {
                      predict_duration_model,
                      predict_intonation_model,
                      decode_model,
                  }| {
-                    let predict_duration_model = ModelFile::new(&path(predict_duration_model))?;
-                    let predict_intonation_model = ModelFile::new(&path(predict_intonation_model))?;
-                    let decode_model = ModelFile::new(&path(decode_model))?;
-                    Ok(Model {
+                    let predict_duration_model = path(predict_duration_model);
+                    let predict_intonation_model = path(predict_intonation_model);
+                    let decode_model = path(decode_model);
+                    Ok(TalkModel {
                         predict_duration_model,
                         predict_intonation_model,
                         decode_model,
@@ -96,49 +112,101 @@ impl ModelFileSet {
             )
             .collect::<anyhow::Result<_>>()?;
 
+        let sing_teacher_models = model_file::SING_TEACHER_MODEL_FILE_NAMES
+            .iter()
+            .map(
+                |&SingTeacherModelFileNames {
+                     predict_sing_consonant_length_model,
+                     predict_sing_f0_model,
+                     predict_sing_volume_model,
+                 }| {
+                    let predict_sing_consonant_length_model =
+                        path(predict_sing_consonant_length_model);
+                    let predict_sing_f0_model = path(predict_sing_f0_model);
+                    let predict_sing_volume_model = path(predict_sing_volume_model);
+                    Ok(SingTeacherModel {
+                        predict_sing_consonant_length_model,
+                        predict_sing_f0_model,
+                        predict_sing_volume_model,
+                    })
+                },
+            )
+            .collect::<anyhow::Result<_>>()?;
+
+        let sf_decode_models = model_file::SF_DECODE_MODEL_FILE_NAMES
+            .iter()
+            .map(|&SfDecodeModelFileNames { sf_decode_model }| {
+                let sf_decode_model = path(sf_decode_model);
+                Ok(SfDecodeModel { sf_decode_model })
+            })
+            .collect::<anyhow::Result<_>>()?;
+
         return Ok(Self {
-            speaker_id_map: model_file::SPEAKER_ID_MAP.iter().copied().collect(),
+            talk_speaker_id_map: model_file::TALK_SPEAKER_ID_MAP.iter().copied().collect(),
+            sing_teacher_speaker_id_map: model_file::SING_TEACHER_SPEAKER_ID_MAP
+                .iter()
+                .copied()
+                .collect(),
+            sf_decode_speaker_id_map: model_file::SF_DECODE_SPEAKER_ID_MAP
+                .iter()
+                .copied()
+                .collect(),
             metas_str,
-            models,
+            talk_models,
+            sing_teacher_models,
+            sf_decode_models,
         });
 
         const ROOT_DIR_ENV_NAME: &str = "VV_MODELS_ROOT_DIR";
     }
 
-    pub(crate) fn models_count(&self) -> usize {
-        self.models.len()
+    pub(crate) fn talk_models_count(&self) -> usize {
+        self.talk_models.len()
+    }
+
+    pub(crate) fn sing_teacher_models_count(&self) -> usize {
+        self.sing_teacher_models.len()
+    }
+
+    pub(crate) fn sf_decode_models_count(&self) -> usize {
+        self.sf_decode_models.len()
     }
 }
 
-struct ModelFileNames {
+struct TalkModelFileNames {
     predict_duration_model: &'static str,
     predict_intonation_model: &'static str,
     decode_model: &'static str,
+}
+
+struct SingTeacherModelFileNames {
+    predict_sing_consonant_length_model: &'static str,
+    predict_sing_f0_model: &'static str,
+    predict_sing_volume_model: &'static str,
+}
+
+struct SfDecodeModelFileNames {
+    sf_decode_model: &'static str,
 }
 
 #[derive(thiserror::Error, Debug)]
 #[error("不正なモデルファイルです")]
 struct DecryptModelError;
 
-struct Model {
-    predict_duration_model: ModelFile,
-    predict_intonation_model: ModelFile,
-    decode_model: ModelFile,
+struct TalkModel {
+    predict_duration_model: PathBuf,
+    predict_intonation_model: PathBuf,
+    decode_model: PathBuf,
 }
 
-struct ModelFile {
-    path: PathBuf,
-    content: Vec<u8>,
+struct SingTeacherModel {
+    predict_sing_consonant_length_model: PathBuf,
+    predict_sing_f0_model: PathBuf,
+    predict_sing_volume_model: PathBuf,
 }
 
-impl ModelFile {
-    fn new(path: &Path) -> anyhow::Result<Self> {
-        let content = fs_err::read(path)?;
-        Ok(Self {
-            path: path.to_owned(),
-            content,
-        })
-    }
+struct SfDecodeModel {
+    sf_decode_model: PathBuf,
 }
 
 #[derive(Deserialize, Getters)]
@@ -205,10 +273,18 @@ unsafe impl Send for Status {}
 impl Status {
     pub fn new(use_gpu: bool, cpu_num_threads: u16) -> Self {
         Self {
-            models: StatusModels {
+            talk_models: StatusTalkModels {
                 predict_duration: BTreeMap::new(),
                 predict_intonation: BTreeMap::new(),
                 decode: BTreeMap::new(),
+            },
+            sing_teacher_models: StatusSingTeacherModels {
+                predict_sing_consonant_length: BTreeMap::new(),
+                predict_sing_f0: BTreeMap::new(),
+                predict_sing_volume: BTreeMap::new(),
+            },
+            sf_decode_models: StatusSfModels {
+                sf_decode: BTreeMap::new(),
             },
             light_session_options: SessionOptions::new(cpu_num_threads, false),
             heavy_session_options: SessionOptions::new(cpu_num_threads, use_gpu),
@@ -229,9 +305,9 @@ impl Status {
         Ok(())
     }
 
-    pub fn load_model(&mut self, model_index: usize) -> Result<()> {
-        if model_index < MODEL_FILE_SET.models.len() {
-            let model = &MODEL_FILE_SET.models[model_index];
+    pub fn load_talk_model(&mut self, model_index: usize) -> Result<()> {
+        if model_index < MODEL_FILE_SET.talk_models.len() {
+            let model = &MODEL_FILE_SET.talk_models[model_index];
             let predict_duration_session =
                 self.new_session(&model.predict_duration_model, &self.light_session_options)?;
             let predict_intonation_session =
@@ -239,14 +315,14 @@ impl Status {
             let decode_model =
                 self.new_session(&model.decode_model, &self.heavy_session_options)?;
 
-            self.models
+            self.talk_models
                 .predict_duration
                 .insert(model_index, predict_duration_session);
-            self.models
+            self.talk_models
                 .predict_intonation
                 .insert(model_index, predict_intonation_session);
 
-            self.models.decode.insert(model_index, decode_model);
+            self.talk_models.decode.insert(model_index, decode_model);
 
             Ok(())
         } else {
@@ -254,20 +330,93 @@ impl Status {
         }
     }
 
-    pub fn is_model_loaded(&self, model_index: usize) -> bool {
-        self.models.predict_intonation.contains_key(&model_index)
-            && self.models.predict_duration.contains_key(&model_index)
-            && self.models.decode.contains_key(&model_index)
+    pub fn is_talk_model_loaded(&self, model_index: usize) -> bool {
+        self.talk_models.predict_duration.contains_key(&model_index)
+            && self
+                .talk_models
+                .predict_intonation
+                .contains_key(&model_index)
+            && self.talk_models.decode.contains_key(&model_index)
+    }
+
+    pub fn load_sing_teacher_model(&mut self, model_index: usize) -> Result<()> {
+        if model_index < MODEL_FILE_SET.sing_teacher_models.len() {
+            let model = &MODEL_FILE_SET.sing_teacher_models[model_index];
+            let predict_sing_consonant_length_session = self.new_session(
+                &model.predict_sing_consonant_length_model,
+                &self.light_session_options,
+            )?;
+            let predict_sing_f0_session =
+                self.new_session(&model.predict_sing_f0_model, &self.light_session_options)?;
+            let predict_sing_volume_session = self.new_session(
+                &model.predict_sing_volume_model,
+                &self.light_session_options,
+            )?;
+
+            self.sing_teacher_models
+                .predict_sing_consonant_length
+                .insert(model_index, predict_sing_consonant_length_session);
+            self.sing_teacher_models
+                .predict_sing_f0
+                .insert(model_index, predict_sing_f0_session);
+            self.sing_teacher_models
+                .predict_sing_volume
+                .insert(model_index, predict_sing_volume_session);
+
+            Ok(())
+        } else {
+            Err(Error::InvalidModelIndex { model_index })
+        }
+    }
+
+    pub fn is_sing_teacher_model_loaded(&self, model_index: usize) -> bool {
+        self.sing_teacher_models
+            .predict_sing_consonant_length
+            .contains_key(&model_index)
+            && self
+                .sing_teacher_models
+                .predict_sing_f0
+                .contains_key(&model_index)
+            && self
+                .sing_teacher_models
+                .predict_sing_volume
+                .contains_key(&model_index)
+    }
+
+    pub fn load_sf_decode_model(&mut self, model_index: usize) -> Result<()> {
+        if model_index < MODEL_FILE_SET.sf_decode_models.len() {
+            let model = &MODEL_FILE_SET.sf_decode_models[model_index];
+            let sf_decode_session =
+                self.new_session(&model.sf_decode_model, &self.heavy_session_options)?;
+
+            self.sf_decode_models
+                .sf_decode
+                .insert(model_index, sf_decode_session);
+
+            Ok(())
+        } else {
+            Err(Error::InvalidModelIndex { model_index })
+        }
+    }
+
+    pub fn is_sf_decode_model_loaded(&self, model_index: usize) -> bool {
+        self.sf_decode_models.sf_decode.contains_key(&model_index)
     }
 
     fn new_session(
         &self,
-        model_file: &ModelFile,
+        model_file: &Path,
         session_options: &SessionOptions,
     ) -> Result<Session<'static>> {
-        self.new_session_from_bytes(|| model_file::decrypt(&model_file.content), session_options)
+        let model_bytes = &match fs_err::read(model_file) {
+            Ok(model_bytes) => model_bytes,
+            Err(err) => {
+                panic!("ファイルを読み込めなかったためクラッシュします: {err}");
+            }
+        };
+        self.new_session_from_bytes(|| model_file::decrypt(model_bytes), session_options)
             .map_err(|source| Error::LoadModel {
-                path: model_file.path.clone(),
+                path: model_file.to_owned(),
                 source,
             })
     }
@@ -311,7 +460,7 @@ impl Status {
         model_index: usize,
         inputs: Vec<&mut dyn AnyArray>,
     ) -> Result<Vec<f32>> {
-        if let Some(model) = self.models.predict_duration.get_mut(&model_index) {
+        if let Some(model) = self.talk_models.predict_duration.get_mut(&model_index) {
             if let Ok(output_tensors) = model.run(inputs) {
                 Ok(output_tensors[0].as_slice().unwrap().to_owned())
             } else {
@@ -327,7 +476,7 @@ impl Status {
         model_index: usize,
         inputs: Vec<&mut dyn AnyArray>,
     ) -> Result<Vec<f32>> {
-        if let Some(model) = self.models.predict_intonation.get_mut(&model_index) {
+        if let Some(model) = self.talk_models.predict_intonation.get_mut(&model_index) {
             if let Ok(output_tensors) = model.run(inputs) {
                 Ok(output_tensors[0].as_slice().unwrap().to_owned())
             } else {
@@ -343,7 +492,83 @@ impl Status {
         model_index: usize,
         inputs: Vec<&mut dyn AnyArray>,
     ) -> Result<Vec<f32>> {
-        if let Some(model) = self.models.decode.get_mut(&model_index) {
+        if let Some(model) = self.talk_models.decode.get_mut(&model_index) {
+            if let Ok(output_tensors) = model.run(inputs) {
+                Ok(output_tensors[0].as_slice().unwrap().to_owned())
+            } else {
+                Err(Error::InferenceFailed)
+            }
+        } else {
+            Err(Error::InvalidModelIndex { model_index })
+        }
+    }
+
+    pub fn predict_sing_consonant_length_session_run(
+        &mut self,
+        model_index: usize,
+        inputs: Vec<&mut dyn AnyArray>,
+    ) -> Result<Vec<i64>> {
+        if let Some(model) = self
+            .sing_teacher_models
+            .predict_sing_consonant_length
+            .get_mut(&model_index)
+        {
+            if let Ok(output_tensors) = model.run(inputs) {
+                Ok(output_tensors[0].as_slice().unwrap().to_owned())
+            } else {
+                Err(Error::InferenceFailed)
+            }
+        } else {
+            Err(Error::InvalidModelIndex { model_index })
+        }
+    }
+
+    pub fn predict_sing_f0_session_run(
+        &mut self,
+        model_index: usize,
+        inputs: Vec<&mut dyn AnyArray>,
+    ) -> Result<Vec<f32>> {
+        if let Some(model) = self
+            .sing_teacher_models
+            .predict_sing_f0
+            .get_mut(&model_index)
+        {
+            if let Ok(output_tensors) = model.run(inputs) {
+                Ok(output_tensors[0].as_slice().unwrap().to_owned())
+            } else {
+                Err(Error::InferenceFailed)
+            }
+        } else {
+            Err(Error::InvalidModelIndex { model_index })
+        }
+    }
+
+    pub fn predict_sing_volume_session_run(
+        &mut self,
+        model_index: usize,
+        inputs: Vec<&mut dyn AnyArray>,
+    ) -> Result<Vec<f32>> {
+        if let Some(model) = self
+            .sing_teacher_models
+            .predict_sing_volume
+            .get_mut(&model_index)
+        {
+            if let Ok(output_tensors) = model.run(inputs) {
+                Ok(output_tensors[0].as_slice().unwrap().to_owned())
+            } else {
+                Err(Error::InferenceFailed)
+            }
+        } else {
+            Err(Error::InvalidModelIndex { model_index })
+        }
+    }
+
+    pub fn sf_decode_session_run(
+        &mut self,
+        model_index: usize,
+        inputs: Vec<&mut dyn AnyArray>,
+    ) -> Result<Vec<f32>> {
+        if let Some(model) = self.sf_decode_models.sf_decode.get_mut(&model_index) {
             if let Ok(output_tensors) = model.run(inputs) {
                 Ok(output_tensors[0].as_slice().unwrap().to_owned())
             } else {
@@ -381,9 +606,16 @@ mod tests {
             cpu_num_threads,
             status.heavy_session_options.cpu_num_threads
         );
-        assert!(status.models.predict_duration.is_empty());
-        assert!(status.models.predict_intonation.is_empty());
-        assert!(status.models.decode.is_empty());
+        assert!(status.talk_models.predict_duration.is_empty());
+        assert!(status.talk_models.predict_intonation.is_empty());
+        assert!(status.talk_models.decode.is_empty());
+        assert!(status
+            .sing_teacher_models
+            .predict_sing_consonant_length
+            .is_empty());
+        assert!(status.sing_teacher_models.predict_sing_f0.is_empty());
+        assert!(status.sing_teacher_models.predict_sing_volume.is_empty());
+        assert!(status.sf_decode_models.sf_decode.is_empty());
         assert!(status.supported_styles.is_empty());
     }
 
@@ -392,7 +624,7 @@ mod tests {
         let mut status = Status::new(true, 0);
         let result = status.load_metas();
         assert_eq!(Ok(()), result);
-        let expected = BTreeSet::from([0, 1, 2, 3]);
+        let expected = BTreeSet::from([0, 1, 2, 3, 3000, 6000]);
         assert_eq!(expected, status.supported_styles);
     }
 
@@ -404,27 +636,83 @@ mod tests {
     }
 
     #[rstest]
-    fn status_load_model_works() {
+    fn status_load_talk_model_works() {
         let mut status = Status::new(false, 0);
-        let result = status.load_model(0);
+        let result = status.load_talk_model(0);
         assert_eq!(Ok(()), result);
-        assert_eq!(1, status.models.predict_duration.len());
-        assert_eq!(1, status.models.predict_intonation.len());
-        assert_eq!(1, status.models.decode.len());
+        assert_eq!(1, status.talk_models.predict_duration.len());
+        assert_eq!(1, status.talk_models.predict_intonation.len());
+        assert_eq!(1, status.talk_models.decode.len());
     }
 
     #[rstest]
-    fn status_is_model_loaded_works() {
+    fn status_is_talk_model_loaded_works() {
         let mut status = Status::new(false, 0);
         let model_index = 0;
         assert!(
-            !status.is_model_loaded(model_index),
+            !status.is_talk_model_loaded(model_index),
             "model should  not be loaded"
         );
-        let result = status.load_model(model_index);
+        let result = status.load_talk_model(model_index);
         assert_eq!(Ok(()), result);
         assert!(
-            status.is_model_loaded(model_index),
+            status.is_talk_model_loaded(model_index),
+            "model should be loaded"
+        );
+    }
+
+    #[rstest]
+    fn status_load_sing_teacher_model_works() {
+        let mut status = Status::new(false, 0);
+        let result = status.load_sing_teacher_model(0);
+        assert_eq!(Ok(()), result);
+        assert_eq!(
+            1,
+            status
+                .sing_teacher_models
+                .predict_sing_consonant_length
+                .len()
+        );
+        assert_eq!(1, status.sing_teacher_models.predict_sing_f0.len());
+        assert_eq!(1, status.sing_teacher_models.predict_sing_volume.len());
+    }
+
+    #[rstest]
+    fn status_is_sing_teacher_model_loaded_works() {
+        let mut status = Status::new(false, 0);
+        let model_index = 0;
+        assert!(
+            !status.is_sing_teacher_model_loaded(model_index),
+            "model should  not be loaded"
+        );
+        let result = status.load_sing_teacher_model(model_index);
+        assert_eq!(Ok(()), result);
+        assert!(
+            status.is_sing_teacher_model_loaded(model_index),
+            "model should be loaded"
+        );
+    }
+
+    #[rstest]
+    fn status_load_sf_decode_model_works() {
+        let mut status = Status::new(false, 0);
+        let result = status.load_sf_decode_model(0);
+        assert_eq!(Ok(()), result);
+        assert_eq!(1, status.sf_decode_models.sf_decode.len());
+    }
+
+    #[rstest]
+    fn status_is_sf_decode_model_loaded_works() {
+        let mut status = Status::new(false, 0);
+        let model_index = 0;
+        assert!(
+            !status.is_sf_decode_model_loaded(model_index),
+            "model should  not be loaded"
+        );
+        let result = status.load_sf_decode_model(model_index);
+        assert_eq!(Ok(()), result);
+        assert!(
+            status.is_sf_decode_model_loaded(model_index),
             "model should be loaded"
         );
     }
