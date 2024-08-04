@@ -1,3 +1,17 @@
+# VOICEVOX NEMO CORE
+
+[VOICEVOX Nemo](https://voicevox.hiroshiba.jp/nemo/) の音声合成コア。  
+[Releases](https://github.com/VOICEVOX/voicevox_nemo_core/releases) にビルド済みのコアライブラリ（.so/.dll/.dylib）があります。
+
+（エディターは [VOICEVOX](https://github.com/VOICEVOX/voicevox/) のマルチエンジン機能を利用、
+エンジンは [VOICEVOX NEMO ENGINE](https://github.com/VOICEVOX/voicevox_nemo_engine/) に詳細があります。）
+
+## API ドキュメント・サンプル
+
+[VOICEVOX CORE](https://github.com/VOICEVOX/voicevox_core/) と同じです。
+
+<details><summary>Fork元のVOICEVOX COREのREADME</summary>
+
 # VOICEVOX CORE
 
 [![releases](https://img.shields.io/github/v/release/VOICEVOX/voicevox_core?label=release)](https://github.com/VOICEVOX/voicevox_core/releases)
@@ -164,6 +178,9 @@ typos
 **[VOICEVOX ENGINE SHARP](https://github.com/yamachu/VoicevoxEngineSharp) [@yamachu](https://github.com/yamachu)** ･･･ VOICEVOX ENGINE の C# 実装  
 **[voicevoxcore4s](https://github.com/windymelt/voicevoxcore4s) [@windymelt](https://github.com/windymelt)** ･･･ VOICEVOX CORE の Scala(JVM) 向け FFI ラッパー  
 **[voicevox_flutter](https://github.com/char5742/voicevox_flutter) [@char5742](https://github.com/char5742)** ･･･ VOICEVOX CORE の Flutter 向け FFI ラッパー  
+
+</details> <!-- Fork元のVOICEVOX ENGINEのREADME -->
+
 ## ライセンス
 
 ソースコードのライセンスは [MIT LICENSE](./LICENSE) です。
